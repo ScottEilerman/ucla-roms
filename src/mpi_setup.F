@@ -2,6 +2,7 @@
 #ifdef MPI
 c--# define TRANSPOSED_MPI_NODE_ORDER
 c--# define PRINT_HOSTNAME
+c--# define VERBOSE
 
 C$    subroutine master_num_threads (nthrds)
 C$    implicit none
@@ -191,6 +192,20 @@ C$    endif
 
         ierr=0
       else
+# ifdef PRINT_HOSTNAME
+        call MPI_Barrier(ocean_grid_comm, ierr)
+        if (mynode>0) call MPI_Recv (blank, 1, MPI_INTEGER, mynode-1,1,
+     &                                   ocean_grid_comm, status, ierr)
+
+        write(msg1,'(A,I5,1x,A,I5,1x,A,2x)') 'MPI rank', mynode,
+     &                              'out of', nsize, 'running on'
+        write(msg2,'(2x,A,2I4)') 'inode,jnode =', inode,jnode
+
+        call system('echo "'/ /msg1/ /'`hostname -s`'/ /msg2/ /'"')
+        if (mynode < NNODES-1) call MPI_Send (blank, 1, MPI_INTEGER,
+     &                          mynode+1, 1, ocean_grid_comm, ierr)
+        call MPI_Barrier(ocean_grid_comm, ierr)
+# endif
         mpi_master_only write(*,'(/1x,A,I4,1x,A,I3,A/)')
      &   '### ERROR: mpi_setup: number of MPI-nodes should be',
      &                         NNODES, 'instead of ', nsize, '.'
