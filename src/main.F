@@ -25,7 +25,7 @@ C$    call MPI_Init_thread(req_lev, level, ierr)
 C$ !!   write(*,*) 'MPI thread support levels =', req_lev,level
 C$    ierr=0
       write(*,*) 'START ROMS'
-      if (ierr == 1) call MPI_Init(ierr)
+      mpi_master_only if (ierr == 1) call MPI_Init(ierr)
       write(*,*) 'Before MPI setup'
       call mpi_setup(ierr)
       write(*,*) 'After MPI setup'
@@ -57,7 +57,7 @@ C$OMP END PARALLEL                       ! launch the model in OpenMP
       call MPI_Barrier(ocean_grid_comm, ierr)
       tend=MPI_Wtime()
       mpi_master_only write(*,*) 'MPI_run_time =', tend-tstart
-      call MPI_Finalize (ierr)
+      mpi_master_only call MPI_Finalize (ierr)
 # endif
 
       stop
