@@ -20,7 +20,7 @@
 
 
       ! Time is in seconds relative to a reference date
-      
+
       ! ---- user input begins
       integer,parameter,dimension(3) :: reference_date = (/2000,1,1/)  ! year, month, day
       integer,parameter :: dt_format = 0
@@ -40,6 +40,8 @@
       character(len=21) :: refdatestr
       integer :: offset = 0
 
+      real,parameter :: eps=1e-2 ! prevent rounding error failures in get_frc_data
+
 
       ! Type ncforce contains all required netcdf variables and input data array for frc variable.
       ! Set the name and time_name of variable to match what is in the input forcing files.
@@ -53,10 +55,13 @@
         integer                           :: irec =0   ! Record number in file
         integer                           :: it1 = 1, it2 = 2              ! used to cycle between correct entries of 'data' above
         real,dimension(2)                 :: times = -99 ! [-99,-99]       ! stores 2 times that go with 'data' above
+        logical                           :: ungridded = .false.
+        character(len=100)                 :: ungridded_forcing_file=''
       end type ncforce
 
       integer, target :: test_var
-      character(len=99), public  :: output_root_name
+      integer, parameter, public :: max_name_size=256
+      character(len=max_name_size), public  :: output_root_name
       character(len=41), public  :: git_hash
 
       ! Dimension names for in and output in netcdf files
@@ -70,7 +75,6 @@
 !    &                                      ,zdimw= 's_w    '
 
       ! index ranges for netcdf output (See init_output_indices)
-!     integer,public :: i0,i1,j0,j1
       integer,public :: bfx,bfy
 
       ! index ranges for coarse netcdf input
@@ -79,11 +83,28 @@
       integer :: nxc,nyc
       real,dimension(:,:),allocatable   :: cdata     ! Array to read in coarse surface forcing data
 
-      integer,parameter :: max_options_string=2000
+      integer,parameter :: max_options_string=20000
+
       ! option string to go into output file attributes
-      character(len=max_options_string),public::surf_forcing_strings=' '
-      character(len=max_options_string),public::bc_options   = 'OFF'      
-      character(len=max_options_string),public::cdr_frc_opt  ='OFF'      
+
+      character(len=max_options_string),public::bc_options   = 'OFF'
+      character(len=max_options_string),public::pipe_frc_opt ='OFF'
+      character(len=max_options_string),public::river_frc_opt='OFF'
+      character(len=max_options_string),public::tide_opt='OFF'
+      character(len=max_options_string),public::bulk_frc_opt='OFF'
+      character(len=max_options_string),public::flux_frc_opt='OFF'
+      character(len=max_options_string),public::particle_opt='OFF'
+      character(len=max_options_string),public::cdr_frc_opt  ='OFF'
+      ! forcing file specifications
+      character(len=max_options_string),public::force_files='N/A'
+      character(len=max_options_string),public::force_info='N/A'
+      character(len=100),public::frctype ! variable across netcdf files (forcing module)
+      ! average files
+      character(len=100),public::avg_output=''
+      character(len=max_options_string),public::diagnostic_opt='diagnostics OFF'
+      ! average diagnostic options
+      character(len=100),public::diag_avg_output=''
+
 
       ! from old ncvars **************:
       integer, parameter, public :: max_frc_files=360
@@ -97,6 +118,10 @@
       ! eta_v      live variables placed in common block and assigned values
       !            in "mpi_setup" rather tnan be parameters defined here.
 
+      integer :: irec_stride
+      integer :: ifile_stride
+      integer, public :: ifile_max_recs(max_frc_files)
+
 #if defined MPI && defined PARALLEL_FILES
       integer, public ::  xi_rho, xi_u, eta_rho, eta_v
 #else
@@ -104,7 +129,6 @@
      &                              xi_u=xi_rho-1, eta_v=eta_rho-1
 #endif
 
-      integer, parameter, public :: max_name_size=256
       character, public :: date_str*44, title*80
       character(len=max_name_size), public :: ininame, grdname, frcfile(max_frc_files)
 
@@ -119,6 +143,10 @@
       public :: put_global_atts
       public :: store_string_att
       public :: create_file
+
+      public :: offset
+      public :: sec2date
+      public :: init_refdate
 
       interface set_frc_data
         module procedure
@@ -140,7 +168,7 @@
       ! subdomains netcdf files are larger because they include buffers
       ! Method 1:
       ! For arrays that have buffers, we use i0:i1,j0:j1.
-      ! These indices are expanded for boundary adjacent 
+      ! These indices are expanded for boundary adjacent
       ! subdomains because there, we output domain buffers
 
       ! Method 2:
@@ -167,7 +195,7 @@
 ! ----------------------------------------------------------------------
       subroutine init_coarse  ![
       ! Work out sizes for coarse arrays
-      ! Used so we can read in coarse surface 
+      ! Used so we can read in coarse surface
       ! forcing data
       !
       use dimensions
@@ -261,6 +289,7 @@
       ! local
       real    :: cff1,cff2  ! for time interpolations
       real    :: modtime    ! model time
+      real    :: dummy_modtime=0  ! a dummy variable that does nothing
       logical :: d1
       integer :: bry
 
@@ -290,7 +319,23 @@
         endif
 
         call fill_frc_slice(nc,modtime,it2,d1,bry)
-      endif 
+
+        ! If (new irec) is greater than (old irec-1), this means we skipped one or more
+        ! forcing entries. Then we need to also do fill_frc_slice for it1,
+        ! and we will read in the greatest irec that is less than (new irec)
+        if (irec_stride > 1) then
+
+          if ((ifile_stride == 0) .or. (nc%irec>2)) then
+            nc%irec = nc%irec-2
+          else
+            nc%ifile = nc%ifile-1
+            nc%irec = ifile_max_recs(nc%ifile) + nc%irec - 2
+          endif
+
+          call fill_frc_slice(nc,dummy_modtime,it1,d1,bry)
+
+        endif
+      endif
 
       nc%it1 = it1
       nc%it2 = it2
@@ -322,6 +367,7 @@
       ! local
       real    :: cff1,cff2  ! for time interpolations
       real    :: modtime    ! model time
+      real    :: dummy_modtime=0  ! a dummy variable that does nothing
       logical :: d1
       integer :: bry
 
@@ -351,7 +397,22 @@
         endif
 
         call fill_frc_slice(nc,modtime,it2,d1,bry)
-      endif 
+        ! If (new irec) is greater than (old irec-1), this means we skipped one or more
+        ! forcing entries. Then we need to also do fill_frc_slice for it1,
+        ! and we will read in the greatest irec that is less than (new irec)
+        if (irec_stride > 1) then
+
+          if ((ifile_stride == 0) .or. (nc%irec>2)) then
+            nc%irec = nc%irec-2
+          else
+            nc%ifile = nc%ifile-1
+            nc%irec = ifile_max_recs(nc%ifile) + nc%irec - 2
+          endif
+
+          call fill_frc_slice(nc,dummy_modtime,it1,d1,bry)
+
+        endif
+      endif
 
       nc%it1 = it1
       nc%it2 = it2
@@ -386,6 +447,7 @@
       ! local
       real    :: cff1,cff2  ! for time interpolations
       real    :: modtime    ! model time
+      real    :: dummy_modtime=0  ! a dummy variable that does nothing
       logical :: d1
       integer :: bry
 
@@ -407,8 +469,25 @@
           it1 = mod(it1,2) + 1
           it2 = mod(it2,2) + 1
         endif
+
         call fill_frc_slice_surf(nc,modtime,it2,gtype)
-      endif 
+
+        ! If (new irec) is greater than (old irec-1), this means we skipped one or more
+        ! forcing entries. Then we need to also do fill_frc_slice for it1,
+        ! and we will read in the greatest irec that is less than (new irec)
+        if (irec_stride > 1) then
+
+          if ((ifile_stride == 0) .or. (nc%irec>2)) then
+            nc%irec = nc%irec-2
+          else
+            nc%ifile = nc%ifile-1
+            nc%irec = ifile_max_recs(nc%ifile) + nc%irec - 2
+          endif
+
+          call fill_frc_slice_surf(nc,dummy_modtime,it1,gtype)
+
+        endif
+      endif
 
       nc%it1 = it1
       nc%it2 = it2
@@ -421,7 +500,8 @@
 
       var2d = cff1*nc%vdata(:,:,it1) + cff2*nc%vdata(:,:,it2)
 
-      if (vtimes(it1)>modtime.or.vtimes(it2)<modtime) then
+!     if (vtimes(it1)>modtime.or.vtimes(it2)<modtime) then
+      if (vtimes(it1)>modtime+eps.or.vtimes(it2)<modtime-eps) then
         print * ,'set_frc_data :: ', nc%vname,frcfile(nc%ifile)
         print * ,'set_frc_data :: ', vtimes(it1), vtimes(it2), modtime
         error stop 'ERROR: set_frc_data :: time interpolation error'
@@ -429,12 +509,12 @@
 
       end subroutine set_frc_data_surf  !]
 ! ----------------------------------------------------------------------
-      subroutine find_new_record(vname,tname,time,ifile,irec,vtime) ![
+      subroutine find_new_record(vname,tname,time,ifile,irec,vtime,ungridded_filename) ![
       ! Finds the index for the filename and record number of the first record
       ! with a time that is larger than the model time. It will stores
       ! the corresponding time of the record in vtime.
 
-      ! When called for the first time, it will find the last record with a 
+      ! When called for the first time, it will find the last record with a
       ! time smaller than the model time.
       implicit none
 
@@ -445,7 +525,9 @@
       integer                       ,intent(inout):: ifile   ! index for file name in list
       integer                       ,intent(inout):: irec    ! variable record entry
       real                          ,intent(out)  :: vtime   ! read in variable time
-
+      character(len=*), optional    ,intent(in)   :: ungridded_filename ! If this variable is present,
+                                                             ! read this file only on the head node.
+                                                             ! It is assumed that this function is only being called on rank 0.
       ! local
       integer, dimension(1) :: dimids     ! time dimension ID
       real    :: time_old
@@ -470,16 +552,24 @@
       else
         first = .false.
       endif
-      
+
       found_rec      = .false.
       found_var_ever = .false.
 
+      irec_stride = 0
+      ifile_stride = 0
       do while (.not.found_rec .and. ifile <= max_frc)               ! while record not found & still more files to check
 
         found_var = .false.                                          ! reset for new file
-        ierr = nf90_open(frcfile(ifile), nf90_nowrite, ncid)
-        if (ierr/=nf90_noerr) 
+        if (present(ungridded_filename)) then
+          ierr = nf90_open(ungridded_filename, nf90_nowrite, ncid)
+        if (ierr/=nf90_noerr)
+     &    call handle_ierr(ierr,'Find_new_record, opening: ',ungridded_filename)
+        else
+          ierr = nf90_open(frcfile(ifile), nf90_nowrite, ncid)
+        if (ierr/=nf90_noerr)
      &    call handle_ierr(ierr,'Find_new_record, opening: ',frcfile(ifile))
+        endif
 
         ierr = nf90_inq_varid(ncid, vname,vid)                       ! check if this file contains the variable
 
@@ -487,9 +577,9 @@
 
           found_var      = .true.
           found_var_ever = .true.
-           
+
           ierr = nf90_inq_varid(ncid,tname,tid)                      ! get time ID
-          if (ierr/=nf90_noerr) 
+          if (ierr/=nf90_noerr)
      &      call handle_ierr(ierr,'Find_new_record, searching: ',tname)
 
           ! Check if the time has a cycle length
@@ -506,9 +596,10 @@
           ! Number of records in file
           ierr = nf90_inquire_variable(ncid,tid, dimids = dimids)
           ierr = nf90_inquire_dimension(ncid, dimids(1), len=max_recs)
-
+          ifile_max_recs(ifile) = max_recs
           do while (irec<max_recs .and. .not. found_rec)             ! Search through the records until correct time is found
 
+            irec_stride = irec_stride+1
             irec=irec+1                                              ! why not use ncread????
             ierr=nf90_get_var(ncid,tid,ltime,(/irec/), (/1/))        ! Get vtime (nf90 needs array hence syntax)
             vtime = ltime(1)
@@ -526,8 +617,14 @@
         endif                                                        ! found var in file
 
         if (.not.found_rec) then                                     ! correct record not found, try next file
-          ifile = ifile+1 
+          ifile_stride = ifile_stride+1
+          ifile = ifile+1
           irec = 0                                                   ! Reset irec for new file
+          if (present(ungridded_filename)) then
+            print *, 'ERROR: find_new_record: Ran out of time records ',
+     &           'for ', vname, ' in single file ', ungridded_filename
+            error stop
+          endif
         endif
 
         ierr=nf90_close (ncid)
@@ -544,7 +641,7 @@
         write(*,'(/1x,3A,I3/)')
      &  'ERROR: find_new_record: Ran out of time records for ',
      &                               vname, ' mynode=', mynode
-        error stop 
+        error stop
       endif
 
       if (first) then  ! Handle initital timestep. Need vtime < model_time. As per (A) above.
@@ -590,7 +687,7 @@
       ! Number of records in file
       ierr = nf90_inquire_variable(ncid,tid, dimids = dimids)
       ierr = nf90_inquire_dimension(ncid, dimids(1), len=max_rec)
-      
+
       allocate(tim(max_rec))
       ierr=nf90_get_var(ncid,tid,tim)
 
@@ -618,6 +715,10 @@
 ! ----------------------------------------------------------------------
       subroutine fill_frc_slice_aux(nc,modtime,it,d1,bry) ![
       ! Fill a time slice of forcing data, not surface forcing
+
+      use param
+      use mpi
+
       implicit none
 
       ! input/outputs
@@ -632,15 +733,44 @@
 
       character(len=20)  :: vname  ! name of variable in input file
       character(len=20)  :: tname  ! time variable name for variable
+      character(len=100) :: forcing_version ! version of forcing input data
+      character(len=300) :: frcstr
       integer            :: irec,ifile
+      integer            :: msg_size
 
       irec  = nc%irec
       ifile = nc%ifile
       vname = nc%vname
       tname = nc%tname
 
+      if (nc%ungridded) then
+        if (mynode == 0) then
+          call find_new_record(vname,tname,modtime,ifile,irec,
+     &                         nc%times(it), nc%ungridded_forcing_file)
+
+          ierr=nf90_open(nc%ungridded_forcing_file,nf90_nowrite, ncid)
+          if (d1) then
+            call ncread(ncid,vname,nc%vdata(:,1,it),(/1,irec/))
+          else
+            call ncread(ncid,vname,nc%vdata(:,:,it),(/1,1,irec/))
+          endif
+          ierr = nf90_close(ncid)
+        endif
+        call MPI_Barrier(ocean_grid_comm, ierr)
+        msg_size = size(nc%vdata(:,:,it))
+        ! These are needed to make sure each rank follows the same
+        ! code pathway in set_frc_data
+        call MPI_Bcast(irec,1,MPI_INTEGER,0,ocean_grid_comm,ierr)
+        call MPI_Bcast(irec_stride,1,MPI_INTEGER,0,ocean_grid_comm,ierr)
+        call MPI_Bcast(ifile,1,MPI_INTEGER,0,ocean_grid_comm,ierr)
+        call MPI_Bcast(ifile_stride,1,MPI_INTEGER,0,ocean_grid_comm,ierr)
+        ! Send time and vdata to each rank
+        call MPI_Bcast(nc%times(it),1,MPI_DOUBLE_PRECISION,0,ocean_grid_comm,ierr)
+        call MPI_Bcast(nc%vdata(:,:,it),msg_size,MPI_DOUBLE_PRECISION,0,ocean_grid_comm,ierr)
+      else
+
       call find_new_record(vname,tname,modtime,ifile,irec,
-     &                         nc%times(it) )
+     &                         nc%times(it))
 
       ierr=nf90_open(frcfile(ifile),nf90_nowrite, ncid)
       ! The size of vdata must match the size of the data in the
@@ -651,7 +781,22 @@
       else
         call ncread(ncid,vname,nc%vdata(:,:,it),(/1,1,irec/))
       endif
+      ! add force file info to output nc
+      if (mynode == 0) then
+        ierr = nf90_get_att(ncid,nf90_global,'data_source',forcing_version)
+        ! if forcing netcdf has information
+        if (len(trim(forcing_version)) /= 0) then
+          ! if attribute has not been set yet
+          if (index(force_info,forcing_version) == 0) then
+            write(frcstr,'(2A)') trim(adjustl(frctype)),
+     &            trim(adjustl(forcing_version))
+            frcstr = trim(adjustl(frcstr))
+            call store_string_att(force_info,frcstr)
+          endif
+        endif
+      endif
       ierr = nf90_close(ncid)
+      endif ! ungridded
 
       if (bry==0) then
         if (mynode==0)
@@ -685,6 +830,8 @@
 
       character(len=20)  :: vname  ! name of variable in input file
       character(len=20)  :: tname  ! time variable name for variable
+      character(len=100) :: forcing_version ! version of forcing input data
+      character(len=300) :: frcstr
       integer            :: irec,ifile
 
       irec  = nc%irec
@@ -704,7 +851,7 @@
           call ncread(ncid,vname,cdata(1:ic1,jc0:jc1),(/1,1,irec/))
         elseif (gtype=='v') then
           call ncread(ncid,vname,cdata(ic0:ic1,1:jc1),(/1,1,irec/))
-        else 
+        else
           call ncread(ncid,vname,cdata(ic0:ic1,jc0:jc1),(/1,1,irec/))
         endif
         call exchange_xxx(cdata,array_bf=cbf)
@@ -714,8 +861,21 @@
           call ncread(ncid,vname,nc%vdata(1:i1,j0:j1,it),(/1,1,irec/))
         elseif (gtype=='v') then
           call ncread(ncid,vname,nc%vdata(i0:i1,1:j1,it),(/1,1,irec/))
-        else    ! rho-grid 
+        else    ! rho-grid
           call ncread(ncid,vname,nc%vdata(i0:i1,j0:j1,it),(/1,1,irec/))
+        endif
+      endif
+      ! add force file info to output nc
+      if (mynode == 0) then
+        ierr = nf90_get_att(ncid,nf90_global,'data_source',forcing_version)
+        ! if forcing netcdf has information
+        if (len(trim(forcing_version)) /= 0) then
+          ! if attribute has not been set yet
+          if (index(force_info,forcing_version) == 0) then
+            write(frcstr,'(2A)') trim(adjustl(frctype)),trim(adjustl(forcing_version))
+            frcstr = trim(adjustl(frcstr))
+            call store_string_att(force_info,frcstr)
+          endif
         endif
       endif
       ierr = nf90_close(ncid)
@@ -732,15 +892,15 @@
       end subroutine fill_frc_slice_surf !]
 ! ----------------------------------------------------------------------
       subroutine display_read_time_to_log(var_name, var_time, var_irec)  ![
-      implicit none   
-        
+      implicit none
+
       character(len=*), intent(in) :: var_name
       integer,          intent(in) :: var_irec
       real,             intent(in) :: var_time
-          
-      write(*,'(9x,A,A12,5x,A,G14.6,1x,A,I4)') 
+
+      write(*,'(9x,A,A12,5x,A,G14.6,1x,A,I4)')
      &  'set_frc :: ',         var_name,
-     &  'input time (days) =', var_time,  
+     &  'input time (days) =', var_time,
      &  'rec =',               var_irec
 
       end subroutine display_read_time_to_log  !]
@@ -766,7 +926,6 @@
       call cancel_kwd (keyword(1:kwlen), ierr)             ! remove keyword from keyword list for read_inp.F
                                                            ! to know it's accounted for
       read(input,'(A)',err=95) output_root_name            ! read & save filename root
-
       goto 100
                                                            ! error for read(input,'(A)',err=95)
   95  write(*,'(/1x,4A/)') '### ERROR: roms_read_write :: Cannot ',
@@ -798,13 +957,13 @@
         call append_date_node(fname)
       endif
 
-!     if (mynode==0) then
-!       print *,'creating: ',fname
-!       stop
-!     endif
+!      if (mynode==0) then
+!        print *,'creating: ',fname
+!        stop
+!      endif
 
       ierr=nf90_create(trim(fname),nf90_netcdf4,ncid)
-      if (ierr/=nf90_noerr) 
+      if (ierr/=nf90_noerr)
      &   call handle_ierr(ierr,'create_file: '/ /trim(fname) )
 
       if (.not.present(nodate)) then
@@ -814,7 +973,7 @@
       endif
 
       call put_global_atts(ncid, ierr)                     ! put global attributes in file
-      if (ierr/=nf90_noerr) 
+      if (ierr/=nf90_noerr)
      %   call handle_ierr(ierr,'create_file: '/ / trim(fname) )
 
       ierr = nf90_close(ncid)
@@ -991,7 +1150,7 @@
 
       offset = (jul-jul0)*3600*24
 
-      write(refdatestr,'(A,I4,A,I0.2,A,I0.2)') 
+      write(refdatestr,'(A,I4,A,I0.2,A,I0.2)')
      &    'Time since ',reference_date(1),'/'
      &,       reference_date(2),'/',reference_date(3)
 
@@ -1000,7 +1159,7 @@
      &           refdatestr(12:21)
       endif
 
-             
+
 
 
       end subroutine init_refdate !]
@@ -1011,7 +1170,7 @@
       implicit none
 
       ! import/export
-      character(len=*),intent(inout):: fname 
+      character(len=*),intent(inout):: fname
       logical,optional,intent(in)   :: nodate    ! leave out date extention
 
       ! Local
@@ -1067,7 +1226,7 @@
       implicit none
 
       ! import/export
-      character(len=*),intent(inout):: fname 
+      character(len=*),intent(inout):: fname
 
       ! Local
       character(len=6)   :: indxstr
@@ -1075,7 +1234,7 @@
       logical :: ncf
       integer :: istart
 
-      ncf =  findstr(fname,'.nc',istart) 
+      ncf =  findstr(fname,'.nc',istart)
       if (ncf) then
         fname(istart:istart+2) = '   '
       else
@@ -1123,18 +1282,18 @@
 
 !     ierr = nf90_open(frcfile(ifile), nf90_nowrite, ncid)
       ierr = nf90_open(file_name,nf90_nowrite,ncid)
-      if (ierr/=nf90_noerr) 
+      if (ierr/=nf90_noerr)
 !    &    call handle_ierr(ierr,'check_units, opening: ',frcfile(ifile))
      &    call handle_ierr(ierr,'check_units, opening: ',file_name)
 
-      ierr = nf90_inq_varid(ncid, var_name, var_id)                    
+      ierr = nf90_inq_varid(ncid, var_name, var_id)
       if (ierr/=0) call handle_ierr(ierr,'check_units:: cant find var')
-      ierr = nf90_get_att(ncid, var_id, 'units', file_var_units)        
+      ierr = nf90_get_att(ncid, var_id, 'units', file_var_units)
       if (ierr/=0) call handle_ierr(ierr,'check_units:: cant find units')
 
       if (trim(var_units) /= trim(file_var_units)) then
         write(*,'(/3x,3A/5x,3A/)') 'ERROR:: check_units: ',
-     &   trim(file_var_units),' for var: ', 
+     &   trim(file_var_units),' for var: ',
      &   trim(var_name),',  Units must be: ', trim(var_units)
         error stop
       end if
@@ -1181,10 +1340,17 @@
       ierr=nf90_put_att(ncid, nf90_global, 'partition', ibuff)
 #endif
 
+      ierr=nf90_put_att(ncid, nf90_global, 'global_x', gnx)
+      ierr=nf90_put_att(ncid, nf90_global, 'global_y', gny)
+
       ierr=nf90_put_att(ncid, nf90_global, 'title',title)         ! Title of the run
 
 #ifndef ANA_GRID
       ierr=nf90_put_att(ncid, nf90_global, 'grid_file',grdname)
+#endif
+#ifndef ANA_GRID
+      ierr=nf90_put_att (ncid, nf90_global, 'forcing_files', force_files)
+      ierr=nf90_put_att (ncid, nf90_global, 'forcing_info', adjustl(force_info))
 #endif
 #ifndef ANA_INITIAL
       ierr=nf90_put_att(ncid, nf90_global, 'init_file',ininame)
@@ -1248,8 +1414,7 @@
       ierr=nf90_put_att (ncid,nf90_global,'q2nu4_units', 'm^4/s')
 #  endif
 # endif
-# if !defined LMD_MIXING && !defined BVF_MIXING && !defined PP_MIXING\
-                         && !defined MY2_MIXING && !defined MY25_MIXING
+# if !defined LMD_MIXING && !defined BVF_MIXING
 
       ierr=nf90_put_att(ncid, nf90_global, 'Akv_bak', Akv_bak)       ! Background vertical viscosity tracer mixing
       ierr=nf90_put_att (ncid, nf90_global, 'Akv_bak_units', 'm^2/s')
@@ -1290,9 +1455,13 @@
       ! string set added to get values from modules without struggling with circular references
       ! as those modules use roms_read_write so this module can't use them.
       ! rather the string is filled in the module's init and can be written here to all files.
-      ierr=nf90_put_att (ncid, nf90_global, 'surf_forcing_strings', surf_forcing_strings)
       ierr=nf90_put_att (ncid, nf90_global, 'bc_options', bc_options)
-
+      ierr=nf90_put_att (ncid, nf90_global, 'bulk_frc_options', bulk_frc_opt)
+      ierr=nf90_put_att (ncid, nf90_global, 'flux_frc_options', flux_frc_opt)
+      ierr=nf90_put_att (ncid, nf90_global, 'tide_options', tide_opt)
+      ierr=nf90_put_att (ncid, nf90_global, 'river_frc_options', river_frc_opt)
+      ierr=nf90_put_att (ncid, nf90_global, 'pipe_frc_options', pipe_frc_opt)
+      ierr=nf90_put_att (ncid, nf90_global, 'particle_options', particle_opt)
       call add_git_hash(ncid)
 
       end subroutine put_global_atts  !]
@@ -1301,7 +1470,6 @@
       ! Add settings that affect the solution to a string
       ! which will be added to global attributes of all nc files
       implicit none
-
       ! input
       character(len=*),intent(inout) :: char_string
       character(len=*),intent(in)    :: string_add

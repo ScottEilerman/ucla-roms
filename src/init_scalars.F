@@ -8,7 +8,7 @@
 ! Note that NONE of the model physical parameters is initialized here.
 
       use param
-      use bgc ! init_scalars_bec2
+      use bec2_vars ! init_scalars_bec2
       use boundary
       use comm_vars
       use mixing
@@ -71,8 +71,6 @@ c      write(*,*) 'kmp_stacksize =', size
 #ifndef ANA_BRY
 !      bry_id=-1
 #endif
-
-!     call get_date (date_str)
 
       call init_dimensions                                 ! needs to come before init_output_indices
       call init_output_indices      ! retire this soon (the bfx, bfy thing)
