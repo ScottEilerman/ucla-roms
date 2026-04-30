@@ -67,16 +67,6 @@ c***              no code here
 # endif
 #endif
 
-!--> Climatological data
-
-#if defined M2NUDGING && !defined M2_FRC_BRY
-# ifdef ANA_SSH
-      call ana_ssh_tile(istr,iend,jstr,jend)
-# else
-      call set_ssh_tile(istr,iend,jstr,jend, ierr)
-# endif
-#endif
-
                                         !--> Surface fluxes
 
 #ifdef ANA_SMFLUX
@@ -145,33 +135,10 @@ c***              no code here
       endif
 
       if (pipe_source) call set_pipe_frc
-
+#if defined(CDR_FORCING)
       if (cdr_source) call set_cdr_frc
-
-# ifdef WEC
-      call set_wec_frc_tile(istr,iend,jstr,jend,ierr)
-      call wec_forces
-# endif
+#endif
 
 #endif  /* SOLVE3D */
 
-
-!--> Bottom boundary fluxes [Styles and Glenn (1996) bottom
-!    boundary layer formulation.  Not implemented in this code]
-
-#if defined ANA_BMFLUX
-      call ana_bmflux ILLEGAL
-#elif defined SG_BBL96
-# ifdef ANA_WWAVE
-      call ana_wwave ILLEGAL
-# else
-      call set_wwave_tile(istr,iend,jstr,jend)
-# endif
-      call sg_bbl96 ILLEGAL
-#endif
-
-c>>>      if (ierr /= 0) may_day_flag=2
-#ifdef ANA_PSOURCE
-      if (ZEROTH_TILE) call ana_psource
-#endif
       end
