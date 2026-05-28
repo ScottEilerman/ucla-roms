@@ -238,6 +238,7 @@
       mpi_master_only write(*,'(/1x,A)') trim(title)
 !==========================================================================================
 #ifndef ANA_INITIAL
+      rewind (namelist_unit)
       read (unit=namelist_unit, nml=INITIAL_CONDITIONS, iostat=ios, iomsg=msg)
 
       if (ios /= 0) then
